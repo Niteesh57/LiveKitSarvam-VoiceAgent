@@ -1,12 +1,12 @@
 """
 LiveKit Agent entrypoint — configures the voice pipeline and starts the session.
 
-Pipeline: Silero VAD → Sarvam STT (Saaras v3) → LLM → Sarvam TTS (Bulbul v3)
+Pipeline: Silero VAD → Sarvam STT (Saaras v3) → GPT-4o-mini → Sarvam TTS (Bulbul v3)
+Optimized for natural, low-latency conversational flow.
 """
 
 import json
 import logging
-import os
 
 from livekit.agents import AgentSession, JobContext
 from livekit.plugins import openai, silero
@@ -21,15 +21,11 @@ logger = logging.getLogger(__name__)
 
 async def entrypoint(ctx: JobContext):
     """
-    LiveKit Agent entrypoint — called when a new room is created.
-
-    Reads customer metadata from the room, builds the system prompt,
-    configures the STT→LLM→TTS pipeline, and starts the conversation.
+    LiveKit Agent entrypoint — optimized for natural, low-latency voice.
     """
-    # Wait for the room to be connected
     await ctx.connect()
 
-    # Extract customer context from room metadata (set by server.py)
+    # Extract customer context from room metadata
     metadata = json.loads(ctx.room.metadata or "{}")
     customer_name = metadata.get("customer_name", "Customer")
     customer_phone = metadata.get("customer_phone", "")
@@ -47,24 +43,21 @@ async def entrypoint(ctx: JobContext):
 
     # ─── Configure LLM ─────────────────────────────────────────────────
     if settings.use_sarvam_llm:
-        # Sarvam sarvam-30b — native Hindi understanding, OpenAI-compatible, supports tool calling
         llm_instance = openai.LLM(
             model="sarvam-30b",
             base_url="https://api.sarvam.ai/v1",
             api_key=settings.sarvam_api_key,
-            temperature=0.6,
+            temperature=0.8,
         )
         logger.info("Using Sarvam sarvam-30b LLM")
     else:
-        # GPT-4o-mini — proven reliability for function calling
         llm_instance = openai.LLM(
             model="gpt-4o-mini",
-            temperature=0.6,
+            temperature=0.8,  # Higher temp = more natural, varied responses
         )
         logger.info("Using OpenAI GPT-4o-mini LLM")
 
-    # ─── Configure Voice Pipeline ──────────────────────────────────────
-    # Map language codes for STT
+    # ─── Configure Voice Pipeline (low-latency + natural) ──────────────
     stt_language = _resolve_stt_language(preferred_language)
 
     session = AgentSession(
@@ -78,7 +71,13 @@ async def entrypoint(ctx: JobContext):
             speaker=settings.sarvam_tts_speaker,
             target_language_code=preferred_language,
             model="bulbul:v3",
+            pace=1.1,  # Slightly faster speech for natural conversational feel
         ),
+        # ─── Low-latency + natural conversation tuning ─────────────────
+        min_endpointing_delay=0.4,    # React quickly after user stops (400ms)
+        max_endpointing_delay=2.5,    # Don't wait too long
+        preemptive_generation=True,   # Start generating before user fully finishes
+        allow_interruptions=True,     # Let user interrupt agent naturally
     )
 
     # Create the agent
@@ -88,27 +87,25 @@ async def entrypoint(ctx: JobContext):
         system_prompt=system_prompt,
     )
 
-    # Start the session — agent joins room and begins listening
+    # Start the session
     await session.start(agent=agent, room=ctx.room)
 
-    # Agent speaks first with a warm greeting
+    # Agent speaks first — short warm greeting with broker name
+    from app.config.constants import BROKER_NAME
     await session.generate_reply(
-        instructions="Greet the customer warmly using the opening script from your instructions. Use Hinglish by default."
+        instructions=f"Say exactly this greeting in Devanagari Hindi: 'हैलो {customer_name} जी! मैं {BROKER_NAME} बोल रहा हूँ, Sunrise Properties से। कैसे हैं आप?' — say only this one sentence, nothing more."
     )
 
     logger.info("Agent session started for room: %s", ctx.room.name)
 
 
 def _resolve_stt_language(language_code: str) -> str:
-    """
-    Map our internal language codes to Sarvam STT language codes.
-    Sarvam Saaras supports: hi-IN, en-IN, mr-IN, and auto-detect.
-    """
+    """Map language codes to Sarvam STT language codes."""
     mapping = {
         "hi-IN": "hi-IN",
         "en-IN": "en-IN",
         "mr-IN": "mr-IN",
-        "hi-EN": "hi-IN",  # Hinglish → use Hindi model (handles code-switching)
-        "unknown": "unknown",  # Auto-detect
+        "hi-EN": "hi-IN",
+        "unknown": "unknown",
     }
     return mapping.get(language_code, "hi-IN")

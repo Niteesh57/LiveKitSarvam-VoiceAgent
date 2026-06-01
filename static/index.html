@@ -356,7 +356,10 @@ body {
 
     <div class="btn-group">
       <button class="btn btn-primary" id="btnConnect" onclick="startCall()">
-        🎤 Start Voice Call
+        🎤 Browser Call
+      </button>
+      <button class="btn btn-primary" id="btnPhoneCall" onclick="startPhoneCall()" style="background:var(--gradient-2);">
+        📞 Call Phone
       </button>
       <button class="btn btn-danger" id="btnDisconnect" onclick="endCall()" disabled>
         ⏹ End Call
@@ -540,6 +543,40 @@ async function endCall() {
   setStatus('', 'Call ended');
 }
 
+async function startPhoneCall() {
+  const name = document.getElementById('customerName').value.trim() || 'Customer';
+  const phone = document.getElementById('customerPhone').value.trim();
+
+  if (!phone || !phone.startsWith('+')) {
+    addLog('Enter a valid phone number with country code (e.g. +919876543210)', 'error');
+    return;
+  }
+
+  setStatus('connecting', 'Dialing ' + phone + '...');
+  addLog(`Calling ${name} at ${phone}...`, 'info');
+
+  try {
+    const res = await fetch('/api/call', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, phone }),
+    });
+
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.error || 'Call failed');
+    }
+
+    setStatus('connected', 'Phone call active — agent is talking to ' + name);
+    addLog(`Call connected: room ${data.room_name}`, 'success');
+    loadLeads();
+
+  } catch (err) {
+    setStatus('error', err.message);
+    addLog('Phone call error: ' + err.message, 'error');
+  }
+}
+
 function resetUI() {
   document.getElementById('btnConnect').disabled = false;
   document.getElementById('btnDisconnect').disabled = true;
@@ -705,6 +742,16 @@ async function addLead() {
 loadLeads();
 // Refresh leads every 10 seconds
 setInterval(loadLeads, 10000);
+
+// Check SIP status and disable phone button if not configured
+fetch('/api/status').then(r => r.json()).then(data => {
+  if (!data.sip_configured) {
+    const btn = document.getElementById('btnPhoneCall');
+    btn.disabled = true;
+    btn.title = 'SIP trunk not configured — set SIP_OUTBOUND_TRUNK_ID in .env';
+    btn.style.opacity = '0.5';
+  }
+}).catch(() => {});
 </script>
 
 </body>

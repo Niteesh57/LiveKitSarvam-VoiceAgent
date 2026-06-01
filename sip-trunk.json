@@ -3,8 +3,8 @@
     "name": "Sunrise-India-Outbound-Plivo",
     "address": "sip.plivo.com",
     "numbers": ["+91XXXXXXXXXX"],
-    "auth_username": "your-plivo-auth-id",
-    "auth_password": "your-plivo-auth-token",
+    "auth_username": "YOUR_PLIVO_AUTH_ID",
+    "auth_password": "YOUR_PLIVO_AUTH_TOKEN",
     "destination_country": "in"
   }
 }

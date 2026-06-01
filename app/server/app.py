@@ -36,4 +36,15 @@ def create_app() -> FastAPI:
     app.include_router(bookings_router, prefix="/api/bookings", tags=["Bookings"])
     app.include_router(webrtc_router, prefix="/api/webrtc", tags=["WebRTC"])
 
+    @app.get("/api/status")
+    async def get_status():
+        """Return system status including SIP trunk availability."""
+        from app.config.settings import settings
+        return {
+            "sip_configured": bool(settings.sip_outbound_trunk_id),
+            "livekit_url": settings.livekit_url,
+            "tts_voice": settings.sarvam_tts_speaker,
+            "use_sarvam_llm": settings.use_sarvam_llm,
+        }
+
     return app

@@ -157,3 +157,42 @@ class BrokerAssistant(Agent):
                 "unless the customer asked for it — just naturally continue in the new language."
             ),
         }
+
+    @function_tool
+    async def end_call(
+        self,
+        context: RunContext,
+        reason: str,
+    ) -> dict:
+        """
+        Gracefully end the call. Call this AFTER log_call_outcome and your final goodbye.
+        Use this when:
+        - Customer said goodbye
+        - Appointment is booked and confirmed
+        - Customer clearly wants to end the conversation
+        - Customer said "don't call again"
+        - Conversation has naturally concluded
+        - You've said your final goodbye
+
+        Args:
+            reason: Brief reason for ending (e.g., "appointment booked", "customer said bye", "not interested")
+        """
+        logger.info(
+            "Call ending for %s: %s", self.customer_phone, reason
+        )
+
+        # Schedule session close after a brief delay to let final audio play
+        import asyncio
+
+        async def _close_session():
+            await asyncio.sleep(3)  # Let final goodbye audio finish playing
+            session = self.session
+            if session:
+                await session.aclose()
+
+        asyncio.create_task(_close_session())
+
+        return {
+            "status": "ending",
+            "message": f"Call ending: {reason}. Goodbye audio will play then disconnect.",
+        }

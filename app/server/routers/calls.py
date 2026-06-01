@@ -90,7 +90,7 @@ async def _create_livekit_call(name: str, phone: str) -> str:
 
 @router.post("")
 async def trigger_call(payload: dict):
-    """Trigger a single outbound call to a customer."""
+    """Trigger a single outbound call to a customer via SIP (Plivo)."""
     name = payload.get("name")
     phone = payload.get("phone")
 
@@ -99,7 +99,14 @@ async def trigger_call(payload: dict):
 
     if not settings.sip_outbound_trunk_id:
         return JSONResponse(
-            {"error": "SIP trunk not configured. Use browser WebRTC calls instead (POST /api/webrtc/token)."},
+            {
+                "error": "SIP trunk not configured. To set up phone calling:\n"
+                "1. Add PLIVO_AUTH_ID, PLIVO_AUTH_TOKEN, PLIVO_PHONE_NUMBER to .env\n"
+                "2. Run: python setup_plivo_trunk.py\n"
+                "3. Add the returned SIP_OUTBOUND_TRUNK_ID to .env\n"
+                "4. Restart the server\n\n"
+                "Or use 'Browser Call' for testing without a phone."
+            },
             status_code=400,
         )
 
