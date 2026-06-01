@@ -1,0 +1,186 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Sunrise  Demo</title>
+<style>
+  * { box-sizing: border-box; font-family: -apple-system, system-ui, sans-serif; }
+  body { margin: 0; padding: 24px; background: #f5f5f7; color: #1d1d1f; max-width: 1100px; margin: 0 auto; }
+  h1 { margin: 0 0 4px; font-size: 24px; }
+  .sub { color: #666; margin-bottom: 24px; font-size: 14px; }
+  .card { background: white; border-radius: 12px; padding: 20px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.06); }
+  .card h2 { margin: 0 0 12px; font-size: 16px; font-weight: 600; }
+  input { width: 100%; padding: 10px; border: 1px solid #d2d2d7; border-radius: 8px; font-size: 13px; }
+  .row { display: grid; grid-template-columns: 2fr 2fr auto; gap: 12px; margin-bottom: 8px; align-items: end; }
+  label { font-size: 12px; color: #666; display: block; margin-bottom: 4px; }
+  button { padding: 8px 16px; border: none; border-radius: 8px; background: #0071e3; color: white; font-size: 13px; font-weight: 500; cursor: pointer; white-space: nowrap; }
+  button:hover { background: #0058b3; }
+  button.sm { padding: 4px 10px; font-size: 12px; }
+  button.ghost { background: #e8e8ed; color: #1d1d1f; }
+  button.danger { background: #ff3b30; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px; border-bottom: 1px solid #eee; }
+  th { font-weight: 600; color: #666; font-size: 11px; text-transform: uppercase; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 500; }
+  .b-pending { background: #fff3cd; color: #856404; }
+  .b-called { background: #d1ecf1; color: #0c5460; }
+  .b-booked { background: #d4edda; color: #155724; }
+  .b-other { background: #f8d7da; color: #721c24; }
+  .booking { padding: 10px 0; border-bottom: 1px solid #eee; font-size: 13px; }
+  .booking:last-child { border-bottom: none; }
+  .booking .when { color: #666; font-size: 11px; }
+  .upload { display: flex; gap: 8px; align-items: center; margin-top: 12px; padding-top: 12px; border-top: 1px solid #eee; }
+  .controls { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+  .controls input { width: 70px; }
+  .small { font-size: 12px; color: #666; }
+</style>
+</head>
+<body>
+
+<h1>Sunrise  Demo</h1>
+<div class="sub" id="brokerSub">Loading...</div>
+
+<div class="card" style="background:#fafbff;border:1px solid #e0e4f5">
+  <h2 style="margin-bottom:8px">📋 Demo config (auto-loaded)</h2>
+  <div id="ctxBanner" style="font-size:13px;line-height:1.7;color:#444">Loading...</div>
+</div>
+
+<div class="card">
+  <h2>Add lead (leaked name + phone)</h2>
+  <div class="row">
+    <div><label>Customer name</label><input id="leadName" placeholder="Anurag"></div>
+    <div><label>Phone (+91...)</label><input id="leadPhone" placeholder="+919141063645"></div>
+    <button onclick="addLead()">+ Add lead</button>
+  </div>
+  <div class="upload">
+    <span class="small">Or bulk:</span>
+    <input type="file" id="csvFile" accept=".csv" style="width:auto;padding:4px">
+    <button class="ghost sm" onclick="loadCsv()">Upload CSV</button>
+    <span class="small">(CSV format: name,phone per row)</span>
+  </div>
+  <div class="small" id="leadStatus" style="margin-top:8px"></div>
+</div>
+
+<div class="card">
+  <h2>Leads <span class="small" id="leadCount"></span></h2>
+  <div class="controls">
+    <button onclick="callAllPending()">📞 Call all pending</button>
+    <label class="small">Stagger sec:</label>
+    <input type="number" id="stagger" value="30" min="5" max="300">
+    <button class="danger sm" onclick="clearLeads()">🗑️ Clear all</button>
+  </div>
+  <table>
+    <thead><tr><th>Name</th><th>Phone</th><th>Status</th><th>Last outcome</th><th></th></tr></thead>
+    <tbody id="leadsBody"><tr><td colspan="5" style="color:#999">No leads loaded</td></tr></tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h2>Bookings & outcomes (live)</h2>
+  <div id="bookings"><div style="color:#999;font-size:13px">No bookings yet</div></div>
+</div>
+
+<script>
+async function loadContext() {
+  const r = await fetch('/api/context'); const c = await r.json();
+  document.getElementById('ctxBanner').innerHTML = `
+    <b>Broker:</b> ${c.broker_name} (${c.agency_name})<br>
+    <b>Office:</b> ${c.office_address}<br>
+    <b>Phone:</b> ${c.broker_phone}<br>
+    <b>Today:</b> ${c.today_human}<br>
+    <b>Slot 1:</b> ${c.slot_1} &nbsp;·&nbsp; <b>Slot 2:</b> ${c.slot_2}`;
+  document.getElementById('brokerSub').textContent = `${c.broker_name} · ${c.agency_name}`;
+}
+async function addLead() {
+  const name = document.getElementById('leadName').value.trim();
+  const phone = document.getElementById('leadPhone').value.trim();
+  if (!name || !phone) return alert('Both fields required');
+  const r = await fetch('/api/leads/add', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name, phone})});
+  const j = await r.json();
+  if (j.error) return alert('❌ ' + j.error);
+  document.getElementById('leadName').value = '';
+  document.getElementById('leadPhone').value = '';
+  document.getElementById('leadStatus').textContent = `✅ Added. ${j.total} leads loaded`;
+  await loadLeads();
+}
+async function loadCsv() {
+  const f = document.getElementById('csvFile').files[0];
+  if (!f) return alert('Pick a CSV first');
+  const fd = new FormData(); fd.append('file', f);
+  const r = await fetch('/api/leads/csv', {method:'POST', body:fd});
+  const j = await r.json();
+  document.getElementById('leadStatus').textContent = `✅ Added ${j.loaded} new. Total: ${j.total}`;
+  await loadLeads();
+}
+async function clearLeads() {
+  if (!confirm('Clear all leads?')) return;
+  await fetch('/api/leads', {method:'DELETE'});
+  await loadLeads();
+}
+async function callAllPending() {
+  const stagger = document.getElementById('stagger').value;
+  if (!confirm(`Call all pending leads with ${stagger}s gap between calls?`)) return;
+  const r = await fetch('/api/call/batch', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({stagger_sec: parseInt(stagger)})});
+  const j = await r.json();
+  if (j.queued === 0) return alert(j.msg);
+  alert(`✅ Queued ${j.queued} calls with ${j.stagger_sec}s stagger.\nWatch the table & bookings live below.`);
+}
+async function loadLeads() {
+  const [r1, r2] = await Promise.all([fetch('/api/leads'), fetch('/api/bookings')]);
+  const leads = await r1.json(); const bookings = await r2.json();
+  // build outcome map: phone → last outcome string
+  const outcomeMap = {};
+  for (const b of bookings) {
+    if (b.customer_phone) {
+      outcomeMap[b.customer_phone] = b.type === 'appointment_booked'
+        ? {label: `BOOKED · ${b.slot_chosen}`, cls: 'b-booked'}
+        : {label: (b.outcome || '').replace(/_/g,' '), cls: b.outcome==='callback_requested'?'b-called':'b-other'};
+    }
+  }
+  const pending = leads.filter(l => l.status==='pending').length;
+  const called = leads.filter(l => l.status==='called').length;
+  document.getElementById('leadCount').textContent = leads.length ? `· ${leads.length} total · ${pending} pending · ${called} called` : '';
+  const body = document.getElementById('leadsBody');
+  if (!leads.length) { body.innerHTML = '<tr><td colspan="5" style="color:#999">No leads loaded</td></tr>'; return; }
+  body.innerHTML = leads.map(l => {
+    const o = outcomeMap[l.phone];
+    const outcomeCell = o ? `<span class="badge ${o.cls}">${o.label}</span>` : '—';
+    return `<tr>
+      <td>${l.name}</td>
+      <td><code>${l.phone}</code></td>
+      <td><span class="badge b-${l.status==='called'?'called':'pending'}">${l.status}</span></td>
+      <td>${outcomeCell}</td>
+      <td>${l.status==='pending' ? `<button class="sm" onclick="callLead('${l.name.replace(/'/g,"\\'")}','${l.phone}')">📞 Call</button>` : '—'}</td>
+    </tr>`;
+  }).join('');
+}
+async function callLead(name, phone) {
+  if (!confirm(`Call ${name} at ${phone}?`)) return;
+  const r = await fetch('/api/call', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name, phone})});
+  const j = await r.json();
+  if (j.error) alert('❌ ' + j.error);
+  else { alert(`✅ Call queued (ID: ${j.id || 'ok'})`); await loadLeads(); }
+}
+async function loadBookings() {
+  const r = await fetch('/api/bookings'); const b = await r.json();
+  const div = document.getElementById('bookings');
+  if (!b.length) { div.innerHTML = '<div style="color:#999;font-size:13px">No bookings yet</div>'; return; }
+  div.innerHTML = b.slice().reverse().map(x => {
+    const isBooked = x.type === 'appointment_booked';
+    const cls = isBooked ? 'b-booked' : (x.outcome==='callback_requested'?'b-called':'b-other');
+    const label = isBooked ? 'BOOKED' : (x.outcome || '').toUpperCase().replace(/_/g,' ');
+    return `<div class="booking">
+      <span class="badge ${cls}">${label}</span>
+      <b>${x.customer_name || x.customer_phone}</b>
+      ${x.slot_chosen ? ` · ${x.slot_chosen}` : ''}
+      ${x.notes ? ` · <i>${x.notes}</i>` : ''}
+      <div class="when">${new Date(x.booked_at).toLocaleString()}</div>
+    </div>`;
+  }).join('');
+}
+setInterval(() => { loadLeads(); loadBookings(); }, 5000);
+loadContext(); loadLeads(); loadBookings();
+</script>
+</body>
+</html>

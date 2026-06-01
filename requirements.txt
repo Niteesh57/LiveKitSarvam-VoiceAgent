@@ -1,0 +1,19 @@
+# Sunrise Properties - LiveKit + Sarvam AI Voice Agent
+# Python Dependencies
+
+# Core Framework
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-dotenv==1.0.1
+python-multipart==0.0.20
+pydantic-settings>=2.7.1
+
+# LiveKit Agents Framework
+livekit-agents[silero,turn-detector]~=1.4
+livekit-plugins-openai~=1.0
+
+# HTTP Client (for Sarvam API calls)
+aiohttp>=3.11.0
+
+# Utilities
+pydantic>=2.0
