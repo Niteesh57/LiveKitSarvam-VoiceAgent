@@ -16,6 +16,7 @@ venv/
 
 # Data (runtime generated)
 data/*.json
+data/recordings/
 
 # OS
 .DS_Store

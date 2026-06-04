@@ -8,7 +8,17 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
 
-from .routers import leads_router, calls_router, bookings_router, context_router, dashboard_router, webrtc_router
+from .routers import (
+    leads_router,
+    calls_router,
+    bookings_router,
+    context_router,
+    dashboard_router,
+    webrtc_router,
+    reminders_router,
+    analytics_router,
+    recordings_router,
+)
 
 
 def create_app() -> FastAPI:
@@ -35,6 +45,9 @@ def create_app() -> FastAPI:
     app.include_router(calls_router, prefix="/api/call", tags=["Calls"])
     app.include_router(bookings_router, prefix="/api/bookings", tags=["Bookings"])
     app.include_router(webrtc_router, prefix="/api/webrtc", tags=["WebRTC"])
+    app.include_router(analytics_router, prefix="/api/analytics", tags=["Analytics"])
+    app.include_router(reminders_router, prefix="/api/reminders", tags=["Reminders"])
+    app.include_router(recordings_router, prefix="/api/recordings", tags=["Recordings"])
 
     @app.get("/api/status")
     async def get_status():

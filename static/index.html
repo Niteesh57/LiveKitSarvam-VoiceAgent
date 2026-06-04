@@ -294,6 +294,8 @@ body {
 .status-badge.called { background: rgba(6, 182, 212, 0.15); color: var(--info); }
 .status-badge.booked { background: rgba(16, 185, 129, 0.15); color: var(--success); }
 .status-badge.completed { background: rgba(99, 102, 241, 0.15); color: var(--accent-hover); }
+.status-badge.wrong_number { background: rgba(100, 116, 139, 0.15); color: var(--text-muted); }
+.status-badge.existing_customer { background: rgba(16, 185, 129, 0.15); color: var(--success); }
 
 /* ─── Log Panel ───────────────────────────────────────────── */
 .log-panel {
@@ -422,8 +424,8 @@ body {
 
 </div>
 
-<!-- Hidden audio element for agent's voice -->
-<audio id="agentAudio" autoplay></audio>
+<!-- Hidden audio element for agent's voice (fallback) -->
+<audio id="agentAudio" autoplay style="display:none;"></audio>
 
 <script>
 // ═══════════════════════════════════════════════════════════════════
@@ -433,6 +435,9 @@ body {
 const { Room, RoomEvent, Track, ConnectionState } = LivekitClient;
 
 let currentRoom = null;
+let mediaRecorder = null;
+let recordedChunks = [];
+let currentRoomName = '';
 
 function setStatus(state, text) {
   const dot = document.getElementById('statusDot');
@@ -479,9 +484,16 @@ async function startCall() {
 
     // 2. Connect to LiveKit room
     currentRoom = new Room({
-      audioCaptureDefaults: { autoGainControl: true, noiseSuppression: true, echoCancellation: true },
+      audioCaptureDefaults: { 
+        autoGainControl: true, 
+        noiseSuppression: true, 
+        echoCancellation: true,
+        sampleRate: 48000,
+        channelCount: 1,
+      },
       adaptiveStream: true,
       dynacast: true,
+      audioOutput: { deviceId: '' },
     });
 
     // Event handlers
@@ -492,10 +504,39 @@ async function startCall() {
     });
 
     currentRoom.on(RoomEvent.Disconnected, () => {
-      setStatus('', 'Disconnected');
+      setStatus('', 'Call ended');
       addLog('Call ended', 'info');
+      if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+        mediaRecorder.stop();
+        mediaRecorder = null;
+      }
+      currentRoom = null;
       resetUI();
     });
+
+    currentRoom.on(RoomEvent.ParticipantDisconnected, (participant) => {
+      addLog(`${participant.identity} left the room`, 'info');
+      // Any non-customer participant leaving means agent hung up
+      if (!participant.identity.startsWith('customer')) {
+        setStatus('', 'Agent ended the call');
+        addLog('Agent disconnected — call complete', 'success');
+        if (currentRoom) {
+          currentRoom.disconnect();
+          currentRoom = null;
+        }
+        resetUI();
+      }
+    });
+
+    // Fallback: check every 3s if room is still connected
+    const connectionCheck = setInterval(() => {
+      if (!currentRoom || currentRoom.state === 'disconnected') {
+        clearInterval(connectionCheck);
+        currentRoom = null;
+        resetUI();
+        setStatus('', 'Call ended');
+      }
+    }, 3000);
 
     currentRoom.on(RoomEvent.ParticipantConnected, (participant) => {
       addLog(`${participant.identity} joined the room`, 'info');
@@ -503,28 +544,105 @@ async function startCall() {
 
     currentRoom.on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
       if (track.kind === Track.Kind.Audio) {
-        // Attach agent's audio to the audio element
-        const audioEl = document.getElementById('agentAudio');
-        track.attach(audioEl);
+        // Attach agent's audio — attach() returns the media element
+        const el = track.attach();
+        el.id = 'agentAudioTrack_' + participant.identity;
+        el.autoplay = true;
+        el.volume = 1.0;
+        document.body.appendChild(el);
         addLog('Agent audio connected — you can hear the agent now', 'success');
       }
     });
 
     currentRoom.on(RoomEvent.TrackUnsubscribed, (track) => {
-      track.detach();
+      const elements = track.detach();
+      elements.forEach(el => el.remove());
     });
 
     currentRoom.on(RoomEvent.ConnectionStateChanged, (state) => {
       if (state === ConnectionState.Reconnecting) {
         setStatus('connecting', 'Reconnecting...');
         addLog('Connection interrupted, reconnecting...', 'error');
+      } else if (state === ConnectionState.Disconnected) {
+        currentRoom = null;
+        resetUI();
+        setStatus('', 'Call ended');
       }
     });
 
-    // 3. Connect and publish microphone
+    // 3. Connect and publish microphone with high quality audio
     await currentRoom.connect(data.livekit_url, data.token);
-    await currentRoom.localParticipant.setMicrophoneEnabled(true);
+    await currentRoom.localParticipant.setMicrophoneEnabled(true, {
+      audioPreset: { maxBitrate: 96000 },
+      dtx: false,
+      red: false,
+      stopMicTrackOnMute: false,
+    });
+
+    // Ensure audio playback is allowed (handles browser autoplay policy)
+    try {
+      await currentRoom.startAudio();
+      addLog('Audio playback enabled', 'success');
+    } catch(e) {
+      addLog('Click anywhere on page if you cannot hear audio', 'info');
+    }
+
     addLog('Microphone enabled — start speaking', 'success');
+
+    // Start browser-side raw mic recording (pre-Opus, full quality)
+    currentRoomName = data.room_name;
+    try {
+      const micStream = await navigator.mediaDevices.getUserMedia({
+        audio: { sampleRate: 48000, channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+      });
+      recordedChunks = [];
+      mediaRecorder = new MediaRecorder(micStream, { mimeType: 'audio/webm;codecs=opus', audioBitsPerSecond: 128000 });
+      mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) recordedChunks.push(e.data); };
+      mediaRecorder.onstop = async () => {
+        if (recordedChunks.length > 0) {
+          const blob = new Blob(recordedChunks, { type: 'audio/webm' });
+          // Upload raw recording to server
+          const formData = new FormData();
+          formData.append('audio', blob, `customer_${currentRoomName}.webm`);
+          formData.append('room_name', currentRoomName);
+          try {
+            await fetch('/api/recordings/upload-customer', { method: 'POST', body: formData });
+            addLog('Customer HD audio uploaded', 'success');
+          } catch(err) { console.error('Upload failed:', err); }
+        }
+        // Stop mic stream tracks
+        micStream.getTracks().forEach(t => t.stop());
+      };
+      mediaRecorder.start(1000); // Capture in 1s chunks
+      addLog('HD mic recording active', 'info');
+    } catch(e) {
+      console.log('Browser recording not available:', e);
+    }
+
+    // Monitor: if no remote participants for 5s, auto-disconnect
+    let noParticipantTimer = null;
+    const checkParticipants = () => {
+      if (!currentRoom) return;
+      const remoteCount = currentRoom.remoteParticipants.size;
+      if (remoteCount === 0 && !noParticipantTimer) {
+        noParticipantTimer = setTimeout(() => {
+          if (currentRoom && currentRoom.remoteParticipants.size === 0) {
+            addLog('No participants in room — auto-ending call', 'info');
+            if (currentRoom) { currentRoom.disconnect(); currentRoom = null; }
+            resetUI();
+            setStatus('', 'Call ended');
+          }
+        }, 5000);
+      } else if (remoteCount > 0 && noParticipantTimer) {
+        clearTimeout(noParticipantTimer);
+        noParticipantTimer = null;
+      }
+    };
+    // Check every 2 seconds
+    const participantMonitor = setInterval(() => {
+      if (!currentRoom) { clearInterval(participantMonitor); return; }
+      checkParticipants();
+    }, 2000);
 
   } catch (err) {
     setStatus('error', 'Connection failed: ' + err.message);
@@ -534,6 +652,11 @@ async function startCall() {
 }
 
 async function endCall() {
+  // Stop browser-side recording first
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    mediaRecorder.stop();
+    mediaRecorder = null;
+  }
   if (currentRoom) {
     addLog('Ending call...', 'info');
     await currentRoom.disconnect();
@@ -580,7 +703,10 @@ async function startPhoneCall() {
 function resetUI() {
   document.getElementById('btnConnect').disabled = false;
   document.getElementById('btnDisconnect').disabled = true;
+  document.getElementById('btnPhoneCall').disabled = false;
   document.getElementById('visualizer').classList.remove('active');
+  // Update status dot
+  document.getElementById('statusDot').className = 'status-dot';
 }
 
 // ═══════════════════════════════════════════════════════════════════

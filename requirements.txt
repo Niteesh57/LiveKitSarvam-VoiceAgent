@@ -11,9 +11,11 @@ pydantic-settings>=2.7.1
 # LiveKit Agents Framework
 livekit-agents[silero,turn-detector]~=1.4
 livekit-plugins-openai~=1.0
+livekit-plugins-deepgram~=1.0
 
 # HTTP Client (for Sarvam API calls)
 aiohttp>=3.11.0
 
 # Utilities
 pydantic>=2.0
+tzdata>=2024.1

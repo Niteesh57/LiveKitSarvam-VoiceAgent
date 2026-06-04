@@ -2,6 +2,7 @@
 Sarvam AI Text-to-Speech plugin for LiveKit Agents.
 
 Uses Sarvam Bulbul v3 REST API at 48kHz for clear audio output.
+Optimized for low first-byte latency with persistent HTTP connections.
 """
 
 import base64
@@ -20,6 +21,7 @@ from app.config.settings import settings
 logger = logging.getLogger(__name__)
 
 SARVAM_TTS_URL = "https://api.sarvam.ai/text-to-speech"
+SARVAM_TTS_STREAM_URL = "https://api.sarvam.ai/text-to-speech/stream"
 
 
 @dataclass
@@ -28,13 +30,14 @@ class SarvamTTSOptions:
     target_language_code: str = "hi-IN"
     speaker: str = "shubh"
     pace: float = 1.0
-    speech_sample_rate: int = 48000
+    speech_sample_rate: int = 24000  # Streaming endpoint supports up to 24kHz
     enable_preprocessing: bool = True
 
 
 class SarvamTTS(tts.TTS):
     """
-    Sarvam Bulbul v3 TTS — high quality Indian language speech synthesis.
+    Sarvam Bulbul v3 TTS — optimized for low-latency voice delivery.
+    Uses persistent HTTP connection pool to eliminate cold-start jitter.
     """
 
     def __init__(
@@ -44,7 +47,7 @@ class SarvamTTS(tts.TTS):
         target_language_code: str = "hi-IN",
         speaker: str = "shubh",
         pace: float = 1.0,
-        speech_sample_rate: int = 48000,
+        speech_sample_rate: int = 24000,
         enable_preprocessing: bool = True,
         api_key: str | None = None,
     ):
@@ -62,11 +65,23 @@ class SarvamTTS(tts.TTS):
             speech_sample_rate=speech_sample_rate,
             enable_preprocessing=enable_preprocessing,
         )
+        # Persistent session with connection pooling and keep-alive
+        # This eliminates TCP/TLS handshake on subsequent requests
+        self._connector = aiohttp.TCPConnector(
+            limit=5,              # Up to 5 concurrent connections
+            keepalive_timeout=60, # Keep connections alive for 60s
+            enable_cleanup_closed=True,
+        )
         self._session: aiohttp.ClientSession | None = None
+        self._recorder = None  # Call recorder reference
 
     def _ensure_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
+            self._session = aiohttp.ClientSession(
+                connector=self._connector,
+                connector_owner=False,  # Don't close connector when session closes
+                timeout=aiohttp.ClientTimeout(total=15, connect=5),
+            )
         return self._session
 
     def synthesize(self, text: str, *, conn_options=None) -> "SarvamChunkedStream":
@@ -79,21 +94,50 @@ class SarvamTTS(tts.TTS):
             api_key=self._api_key,
             session_factory=self._ensure_session,
             conn_options=conn_options,
+            recorder=self._recorder,
         )
+
+    async def prewarm(self) -> None:
+        """Pre-warm the HTTP connection to Sarvam API to reduce first-request latency."""
+        session = self._ensure_session()
+        try:
+            # Make a tiny request to establish the connection
+            async with session.post(
+                SARVAM_TTS_STREAM_URL,
+                json={
+                    "text": ".",
+                    "target_language_code": "hi-IN",
+                    "speaker": self._opts.speaker,
+                    "model": self._opts.model,
+                    "speech_sample_rate": self._opts.speech_sample_rate,
+                    "output_audio_codec": "linear16",
+                },
+                headers={
+                    "Content-Type": "application/json",
+                    "api-subscription-key": self._api_key,
+                },
+            ) as resp:
+                await resp.read()  # Consume response to keep connection alive
+                logger.debug("TTS stream connection pre-warmed (status: %d)", resp.status)
+        except Exception as e:
+            logger.debug("TTS prewarm failed (non-critical): %s", e)
 
     async def aclose(self) -> None:
         if self._session and not self._session.closed:
             await self._session.close()
+        if self._connector and not self._connector.closed:
+            await self._connector.close()
 
 
 class SarvamChunkedStream(tts.ChunkedStream):
-    """Synthesize text via Sarvam TTS REST API."""
+    """Synthesize text via Sarvam TTS REST API with optimized connection reuse."""
 
-    def __init__(self, *, tts, input_text, opts, api_key, session_factory, conn_options):
+    def __init__(self, *, tts, input_text, opts, api_key, session_factory, conn_options, recorder=None):
         super().__init__(tts=tts, input_text=input_text, conn_options=conn_options)
         self._opts = opts
         self._api_key = api_key
         self._session_factory = session_factory
+        self._recorder = recorder
 
     async def _run(self, output_emitter) -> None:
         request_id = str(uuid.uuid4())
@@ -114,6 +158,8 @@ class SarvamChunkedStream(tts.ChunkedStream):
             "api-subscription-key": self._api_key,
         }
 
+        # Use streaming endpoint with linear16 (raw PCM) — chunks arrive
+        # progressively as audio is generated, slashing time-to-first-audio.
         payload = {
             "text": text,
             "target_language_code": _resolve_tts_language(self._opts.target_language_code),
@@ -121,10 +167,66 @@ class SarvamChunkedStream(tts.ChunkedStream):
             "model": self._opts.model,
             "pace": self._opts.pace,
             "speech_sample_rate": self._opts.speech_sample_rate,
+            "output_audio_codec": "linear16",
             "enable_preprocessing": self._opts.enable_preprocessing,
         }
 
-        async with session.post(SARVAM_TTS_URL, json=payload, headers=headers) as resp:
+        try:
+            await self._run_streaming(session, payload, headers, output_emitter)
+        except Exception as e:
+            # Fall back to non-streaming REST endpoint on any streaming failure
+            logger.warning("Streaming TTS failed (%s) — falling back to REST", e)
+            await self._run_rest(session, payload, headers, output_emitter)
+
+    async def _run_streaming(self, session, payload, headers, output_emitter) -> None:
+        """Stream raw PCM audio chunks from Sarvam streaming endpoint."""
+        first_chunk = True
+        total_bytes = 0
+        leftover = b""  # carry odd byte across chunks (16-bit alignment)
+
+        async with session.post(
+            SARVAM_TTS_STREAM_URL, json=payload, headers=headers
+        ) as resp:
+            if resp.status != 200:
+                error_text = await resp.text()
+                from livekit.agents._exceptions import APIError
+                raise APIError(f"Sarvam stream TTS {resp.status}: {error_text}")
+
+            async for chunk in resp.content.iter_chunked(4096):
+                if not chunk:
+                    continue
+
+                # Skip WAV/RIFF header on the very first chunk if present
+                if first_chunk and chunk[:4] == b"RIFF":
+                    # WAV header is 44 bytes — strip it to get raw PCM
+                    chunk = chunk[44:]
+                first_chunk = False
+
+                # Maintain 16-bit (2-byte) alignment across chunk boundaries
+                data = leftover + chunk
+                if len(data) % 2 != 0:
+                    leftover = data[-1:]
+                    data = data[:-1]
+                else:
+                    leftover = b""
+
+                if data:
+                    total_bytes += len(data)
+                    if self._recorder and self._recorder.is_recording:
+                        self._recorder.add_agent_audio(data)
+                    output_emitter.push(data)
+
+        if leftover:
+            output_emitter.push(leftover + b"\x00")
+
+        logger.debug("TTS stream: %d bytes PCM delivered progressively", total_bytes)
+
+    async def _run_rest(self, session, payload, headers, output_emitter) -> None:
+        """Fallback: non-streaming REST endpoint (base64 JSON response)."""
+        rest_payload = dict(payload)
+        rest_payload.pop("output_audio_codec", None)
+
+        async with session.post(SARVAM_TTS_URL, json=rest_payload, headers=headers) as resp:
             if resp.status != 200:
                 error_text = await resp.text()
                 logger.error("Sarvam TTS error (%d): %s", resp.status, error_text)
@@ -140,19 +242,44 @@ class SarvamChunkedStream(tts.ChunkedStream):
 
             audio_bytes = base64.b64decode(audio_b64)
 
-            # Extract raw PCM from WAV
             if audio_bytes[:4] == b"RIFF":
                 buf = io.BytesIO(audio_bytes)
                 with wave.open(buf, "rb") as wf:
                     pcm = wf.readframes(wf.getnframes())
-                    logger.debug(
-                        "TTS: %d bytes PCM, %.2fs audio",
-                        len(pcm),
-                        wf.getnframes() / wf.getframerate(),
-                    )
+                    if self._recorder and self._recorder.is_recording:
+                        self._recorder.add_agent_audio(pcm)
                     output_emitter.push(pcm)
             else:
+                if self._recorder and self._recorder.is_recording:
+                    self._recorder.add_agent_audio(audio_bytes)
                 output_emitter.push(audio_bytes)
+
+
+# ─── Recording hook ────────────────────────────────────────────────────
+_active_recorder = None
+
+
+def set_active_recorder(recorder) -> None:
+    """Register a recorder to receive agent TTS audio frames."""
+    global _active_recorder
+    _active_recorder = recorder
+    logger.debug("TTS recorder hook registered")
+
+
+def clear_active_recorder() -> None:
+    """Unregister the active recorder."""
+    global _active_recorder
+    _active_recorder = None
+
+
+def _notify_recorder(pcm_data: bytes) -> None:
+    """Send PCM data to the active recorder if one is set."""
+    global _active_recorder
+    if _active_recorder is not None:
+        try:
+            _active_recorder.add_agent_audio(pcm_data)
+        except Exception:
+            pass
 
 
 def _resolve_tts_language(language_code: str) -> str:

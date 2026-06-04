@@ -114,6 +114,89 @@ class DataStore:
         bookings.append(booking)
         self._write(self.bookings_file, bookings)
 
+    # ─── Conversations / Memory ────────────────────────────────────────
+
+    @property
+    def conversations_file(self) -> Path:
+        return self._data_dir / "conversations.json"
+
+    def get_conversations(self) -> dict:
+        return self._read(self.conversations_file, {})
+
+    def save_conversation(self, phone: str, entry: dict) -> None:
+        conversations = self.get_conversations()
+        if phone not in conversations:
+            conversations[phone] = []
+        conversations[phone].append(entry)
+        self._write(self.conversations_file, conversations)
+
+    def get_customer_conversations(self, phone: str) -> list[dict]:
+        conversations = self.get_conversations()
+        return conversations.get(phone, [])
+
+    # ─── Reminders ─────────────────────────────────────────────────────
+
+    @property
+    def reminders_file(self) -> Path:
+        return self._data_dir / "reminders.json"
+
+    def get_reminders(self) -> list[dict]:
+        return self._read(self.reminders_file, [])
+
+    def save_reminder(self, reminder: dict) -> None:
+        reminders = self.get_reminders()
+        reminders.append(reminder)
+        self._write(self.reminders_file, reminders)
+
+    # ─── WhatsApp Queue ────────────────────────────────────────────────
+
+    @property
+    def whatsapp_queue_file(self) -> Path:
+        return self._data_dir / "whatsapp_queue.json"
+
+    def get_whatsapp_queue(self) -> list[dict]:
+        return self._read(self.whatsapp_queue_file, [])
+
+    def queue_whatsapp_message(self, message: dict) -> None:
+        queue = self.get_whatsapp_queue()
+        queue.append(message)
+        self._write(self.whatsapp_queue_file, queue)
+
+    # ─── Lead Scores ───────────────────────────────────────────────────
+
+    @property
+    def lead_scores_file(self) -> Path:
+        return self._data_dir / "lead_scores.json"
+
+    def get_lead_scores(self) -> dict:
+        return self._read(self.lead_scores_file, {})
+
+    def update_lead_score(self, phone: str, score: str) -> None:
+        scores = self.get_lead_scores()
+        scores[phone] = score
+        self._write(self.lead_scores_file, scores)
+
+    # ─── Call Durations ────────────────────────────────────────────────
+
+    @property
+    def call_durations_file(self) -> Path:
+        return self._data_dir / "call_durations.json"
+
+    def get_call_durations(self) -> list[dict]:
+        return self._read(self.call_durations_file, [])
+
+    def track_call_duration(self, phone: str, duration_seconds: float) -> None:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        IST = ZoneInfo("Asia/Kolkata")
+        durations = self.get_call_durations()
+        durations.append({
+            "phone": phone,
+            "duration_seconds": round(duration_seconds, 1),
+            "timestamp": datetime.now(IST).isoformat(),
+        })
+        self._write(self.call_durations_file, durations)
+
 
 # Module-level singleton
 data_store = DataStore()

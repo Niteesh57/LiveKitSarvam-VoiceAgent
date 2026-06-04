@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     # ─── Sarvam AI ─────────────────────────────────────────────────────
     sarvam_api_key: str = Field(..., description="Sarvam AI API Key")
 
+    # ─── Deepgram (streaming STT) ─────────────────────────────────────
+    deepgram_api_key: str = Field(default="", description="Deepgram API Key for streaming STT")
+    stt_provider: str = Field(default="sarvam", description="STT provider: deepgram or sarvam")
+
     # ─── OpenAI (optional if using Sarvam LLM) ────────────────────────
     openai_api_key: str = Field(default="", description="OpenAI API Key")
 
@@ -42,6 +46,10 @@ class Settings(BaseSettings):
         default=Path(__file__).parent.parent.parent / "data",
         description="Directory for JSON data files",
     )
+
+    # ─── WhatsApp Integration (optional — stub mode if not set) ───────
+    whatsapp_api_key: str = Field(default="", description="WhatsApp API key (Twilio/Plivo)")
+    whatsapp_phone_number: str = Field(default="", description="WhatsApp sender phone number")
 
     class Config:
         env_file = ".env"

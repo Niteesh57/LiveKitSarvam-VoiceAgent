@@ -1,6 +1,7 @@
 """
 Prompt engine — loads and hydrates the system prompt with runtime variables.
 Supports multi-language instructions for Hindi, English, Marathi, and mixed modes.
+Injects customer memory context for personalized conversations.
 """
 
 from pathlib import Path
@@ -14,13 +15,14 @@ class PromptEngine:
     """Loads the system prompt template and injects runtime variables."""
 
     @staticmethod
-    def get_prompt(customer_name: str, customer_phone: str) -> str:
+    def get_prompt(customer_name: str, customer_phone: str, customer_memory: str = "") -> str:
         """
         Build the fully hydrated system prompt for a specific customer call.
 
         Args:
             customer_name: Customer's display name
             customer_phone: Customer's phone number with country code
+            customer_memory: Formatted previous conversation history (optional)
 
         Returns:
             Complete system prompt string with all variables replaced
@@ -34,6 +36,15 @@ class PromptEngine:
         template = PROMPT_FILE.read_text(encoding="utf-8")
         ctx = get_runtime_context()
 
+        # Format customer memory section
+        if customer_memory:
+            memory_section = (
+                f"This is a returning customer. Previous interaction details:\n{customer_memory}\n"
+                "Use this context to personalize the conversation — reference what they mentioned before."
+            )
+        else:
+            memory_section = "This is the first call with this customer. No previous history available."
+
         replacements = {
             "{{customer_name}}": customer_name,
             "{{customer_phone}}": customer_phone,
@@ -44,6 +55,7 @@ class PromptEngine:
             "{{slot_1}}": ctx["slot_1"],
             "{{slot_2}}": ctx["slot_2"],
             "{{today_human}}": ctx["today_human"],
+            "{{customer_memory}}": memory_section,
         }
 
         prompt = template

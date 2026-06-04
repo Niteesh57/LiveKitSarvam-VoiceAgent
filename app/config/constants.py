@@ -8,6 +8,18 @@ AGENCY_NAME = "Sunrise Properties"
 OFFICE_ADDRESS = "A-203 Pearl Plaza, Andheri West, Mumbai 400053"
 BROKER_PHONE = "+91 98765 43210"
 
+# ─── Basic Domain Facts (high-level answers the agent CAN give on call) ─────
+# These are safe, general facts. Specifics (exact price, unit, floor plan)
+# are still reserved for the office visit.
+BROKER_FACTS = {
+    "rera": "हाँ जी, हमारे सभी projects RERA registered हैं।",
+    "areas": "हमारे पास Andheri, Goregaon, Malad और Borivali side में options हैं।",
+    "possession": "कुछ projects ready-to-move हैं और कुछ under-construction — दोनों options हैं।",
+    "loan": "हाँ जी, home loan में हम पूरी help करते हैं — सभी major banks के साथ tie-up है।",
+    "property_types": "1BHK, 2BHK, 3BHK — सभी configurations available हैं।",
+    "site_visit": "Office में मिलने के बाद site visit भी arrange कर सकते हैं।",
+}
+
 # ─── Language Configuration ────────────────────────────────────────────────
 # Sarvam AI supports these Indian languages natively
 SUPPORTED_LANGUAGES = {
@@ -35,6 +47,8 @@ VALID_OUTCOMES = [
     "not_interested_now",
     "dnc_requested",
     "customer_busy_reschedule",
+    "wrong_number",
+    "existing_customer",
 ]
 
 # ─── Agent Timing Configuration ───────────────────────────────────────────

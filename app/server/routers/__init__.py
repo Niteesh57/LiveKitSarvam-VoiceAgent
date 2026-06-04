@@ -6,6 +6,9 @@ from .bookings import router as bookings_router
 from .context import router as context_router
 from .dashboard import router as dashboard_router
 from .webrtc import router as webrtc_router
+from .reminders import router as reminders_router
+from .analytics import router as analytics_router
+from .recordings import router as recordings_router
 
 __all__ = [
     "leads_router",
@@ -14,4 +17,7 @@ __all__ = [
     "context_router",
     "dashboard_router",
     "webrtc_router",
+    "reminders_router",
+    "analytics_router",
+    "recordings_router",
 ]
