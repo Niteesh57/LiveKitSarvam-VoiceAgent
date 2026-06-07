@@ -57,3 +57,16 @@ SILENCE_TIMEOUT_SECONDS = 30
 BATCH_STAGGER_MIN_SECONDS = 5
 BATCH_STAGGER_MAX_SECONDS = 300
 BATCH_STAGGER_DEFAULT_SECONDS = 30
+
+# How often the server checks for appointment reminders that are due to send
+REMINDER_CHECK_INTERVAL_SECONDS = 300  # 5 minutes
+
+# ─── Inactive-room reaper ──────────────────────────────────────────────────
+# A LiveKit room is force-deleted once it has been continuously "inactive"
+# (no participants, or no one publishing audio) for at least this long.
+# A healthy voice call always has >=1 publisher, so live calls are never hit.
+ROOM_INACTIVITY_TIMEOUT_SECONDS = 300   # 5 minutes
+ROOM_REAPER_INTERVAL_SECONDS = 60       # how often to sweep
+# Only rooms whose names start with these prefixes are eligible for reaping,
+# so unrelated rooms in a shared LiveKit project are never touched.
+MANAGED_ROOM_PREFIXES = ("call-", "web-")

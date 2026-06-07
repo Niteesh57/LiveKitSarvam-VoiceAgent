@@ -7,6 +7,7 @@ Tracks reminder status (sent/pending).
 
 import json
 import logging
+import re
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -21,6 +22,71 @@ IST = ZoneInfo("Asia/Kolkata")
 
 # Reminder window: appointments within the next 24 hours
 REMINDER_WINDOW_HOURS = 24
+
+# Month name → number lookup for slot parsing
+_MONTHS = {
+    "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+    "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+    "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9,
+    "oct": 10, "october": 10, "nov": 11, "november": 11, "dec": 12, "december": 12,
+}
+
+
+def parse_appointment_slot(slot: str, now: datetime | None = None) -> datetime | None:
+    """
+    Best-effort parse of a free-text appointment slot into an IST datetime.
+
+    Handles the English format the agent typically produces, e.g.
+    "Monday June 12 at 1 PM", "Saturday June 6 at 5 PM", "June 8 at 11:30 AM".
+
+    Returns None for slots that cannot be confidently parsed (e.g. Hinglish
+    free-text like "kal subah"). Callers MUST treat None as "unknown time"
+    and never auto-send a reminder for it — this avoids mis-timed messages.
+    """
+    if not slot:
+        return None
+
+    now = now or datetime.now(IST)
+    text = slot.lower()
+
+    # Month + day (e.g. "june 12")
+    month_match = re.search(
+        r"(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\s+(\d{1,2})",
+        text,
+    )
+    if not month_match:
+        return None
+
+    month = _MONTHS.get(month_match.group(1))
+    day = int(month_match.group(2))
+    if not month or not (1 <= day <= 31):
+        return None
+
+    # Time (e.g. "1 pm", "11 am", "5:30 pm"). Default to 11:00 (the app's
+    # standard slot hour) when no explicit time is present.
+    hour, minute = 11, 0
+    time_match = re.search(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)", text)
+    if time_match:
+        hour = int(time_match.group(1)) % 12
+        minute = int(time_match.group(2)) if time_match.group(2) else 0
+        if time_match.group(3) == "pm":
+            hour += 12
+
+    year = now.year
+    try:
+        dt = datetime(year, month, day, hour, minute, tzinfo=IST)
+    except ValueError:
+        return None
+
+    # Year-boundary handling: a date far in the past likely means next year
+    # (e.g. booking a "January" slot in December).
+    if dt < now - timedelta(days=60):
+        try:
+            dt = dt.replace(year=year + 1)
+        except ValueError:
+            return None
+
+    return dt
 
 
 class ReminderManager:
@@ -57,12 +123,19 @@ class ReminderManager:
 
     def get_upcoming_appointments(self) -> list[dict]:
         """
-        Get all appointments booked within the next 24 hours.
-        Parses the slot_chosen field from bookings.
+        Get appointment bookings, enriched with parsed timing info.
+
+        Each entry gains additive fields:
+          - appointment_time: ISO datetime string, or "" if unparseable
+          - hours_until: float hours from now, or None if unparseable
+          - parse_ok: bool — whether the slot was successfully parsed
+
+        NOTE: this returns ALL appointment bookings (not just future ones) so
+        existing callers keep working; use get_due_reminders() for the
+        time-windowed set actually eligible for an automatic reminder.
         """
         bookings = data_store.get_bookings()
         now = datetime.now(IST)
-        window_end = now + timedelta(hours=REMINDER_WINDOW_HOURS)
 
         upcoming = []
         for booking in bookings:
@@ -70,18 +143,90 @@ class ReminderManager:
                 continue
 
             slot = booking.get("slot_chosen", "")
-            customer_name = booking.get("customer_name", "Customer")
-            customer_phone = booking.get("customer_phone", "")
-            booked_at = booking.get("booked_at", "")
+            appt_dt = parse_appointment_slot(slot, now)
 
-            upcoming.append({
-                "customer_name": customer_name,
-                "customer_phone": customer_phone,
+            entry = {
+                "customer_name": booking.get("customer_name", "Customer"),
+                "customer_phone": booking.get("customer_phone", ""),
                 "slot_chosen": slot,
-                "booked_at": booked_at,
-            })
+                "booked_at": booking.get("booked_at", ""),
+                "appointment_time": appt_dt.isoformat() if appt_dt else "",
+                "hours_until": (
+                    round((appt_dt - now).total_seconds() / 3600, 1) if appt_dt else None
+                ),
+                "parse_ok": appt_dt is not None,
+            }
+            upcoming.append(entry)
 
         return upcoming
+
+    def get_due_reminders(self) -> list[dict]:
+        """
+        Appointments eligible for an automatic reminder right now:
+          - the slot was parseable,
+          - it is in the future,
+          - it falls within the next REMINDER_WINDOW_HOURS,
+          - and a reminder has not already been sent for it.
+
+        Unparseable slots are intentionally excluded so we never send a
+        mis-timed reminder.
+        """
+        now = datetime.now(IST)
+        sent_reminders = self._read_reminders()
+        sent_keys = {
+            f"{r.get('customer_phone', '')}_{r.get('slot_chosen', '')}"
+            for r in sent_reminders
+        }
+
+        due = []
+        for appt in self.get_upcoming_appointments():
+            if not appt["parse_ok"]:
+                continue
+            hours_until = appt["hours_until"]
+            if hours_until is None or hours_until < 0:
+                continue  # past appointment
+            if hours_until > REMINDER_WINDOW_HOURS:
+                continue  # too far out
+            key = f"{appt['customer_phone']}_{appt['slot_chosen']}"
+            if key in sent_keys:
+                continue  # already reminded
+            due.append(appt)
+
+        return due
+
+    def send_due_reminders(self) -> int:
+        """
+        Send reminders for all due appointments via the WhatsApp layer and
+        mark each as sent. Idempotent — already-sent reminders are skipped.
+
+        Returns the number of reminders sent.
+        """
+        # Imported here to avoid a circular import at module load time.
+        from app.core.whatsapp import send_appointment_reminder
+
+        due = self.get_due_reminders()
+        sent_count = 0
+
+        for appt in due:
+            phone = appt["customer_phone"]
+            if not phone:
+                continue
+            try:
+                send_appointment_reminder(
+                    phone, appt["customer_name"], appt["slot_chosen"]
+                )
+                self.mark_reminder_sent(phone, appt["slot_chosen"])
+                sent_count += 1
+                logger.info(
+                    "Reminder sent to %s for %s (in %.1fh)",
+                    phone, appt["slot_chosen"], appt["hours_until"],
+                )
+            except Exception as e:
+                logger.error("Failed to send reminder to %s: %s", phone, e)
+
+        if sent_count:
+            logger.info("send_due_reminders: %d reminder(s) sent", sent_count)
+        return sent_count
 
     def get_pending_reminders(self) -> list[dict]:
         """
@@ -130,7 +275,7 @@ class ReminderManager:
         })
         self._write_reminders(reminders)
 
-    def get_all_reminders(self) -> list[dict]:
+    def get_all_reminders(self) -> dict:
         """Get all reminder records (sent and pending)."""
         sent = self._read_reminders()
         pending = self.get_pending_reminders()

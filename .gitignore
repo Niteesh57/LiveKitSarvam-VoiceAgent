@@ -1,6 +1,9 @@
 # Environment
 .env
 
+# Docs
+README.md
+
 # Python
 __pycache__/
 *.py[cod]

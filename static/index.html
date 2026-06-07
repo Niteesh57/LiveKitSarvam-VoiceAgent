@@ -438,6 +438,7 @@ let currentRoom = null;
 let mediaRecorder = null;
 let recordedChunks = [];
 let currentRoomName = '';
+let currentPhoneRoom = '';   // room name of an active SIP/phone call (no browser WebRTC)
 
 function setStatus(state, text) {
   const dot = document.getElementById('statusDot');
@@ -474,12 +475,20 @@ async function startCall() {
       body: JSON.stringify({ name, phone, language }),
     });
 
-    if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.error || 'Failed to get token');
+    // Parse defensively: on a server error the body may be plain text
+    // (e.g. "Internal Server Error"), which is not valid JSON.
+    const raw = await res.text();
+    let data;
+    try {
+      data = raw ? JSON.parse(raw) : {};
+    } catch (_) {
+      data = { error: raw || ('HTTP ' + res.status) };
     }
 
-    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.error || data.detail || ('Request failed (HTTP ' + res.status + ')'));
+    }
+
     addLog(`Room created: ${data.room_name}`, 'success');
 
     // 2. Connect to LiveKit room
@@ -657,10 +666,32 @@ async function endCall() {
     mediaRecorder.stop();
     mediaRecorder = null;
   }
+  // Browser WebRTC call: disconnect locally.
   if (currentRoom) {
     addLog('Ending call...', 'info');
     await currentRoom.disconnect();
     currentRoom = null;
+  }
+  // Phone (SIP) call: ask the server to tear down the LiveKit room.
+  if (currentPhoneRoom) {
+    addLog('Ending phone call...', 'info');
+    try {
+      const res = await fetch('/api/call/end', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ room_name: currentPhoneRoom }),
+      });
+      const data = await res.json();
+      if (res.ok && data.ok) {
+        addLog('Phone call ended', 'success');
+      } else {
+        addLog('Phone call may have already ended: ' + (data.error || res.status), 'info');
+      }
+    } catch (err) {
+      addLog('Failed to end phone call: ' + err.message, 'error');
+    }
+    currentPhoneRoom = '';
+    loadLeads();
   }
   resetUI();
   setStatus('', 'Call ended');
@@ -689,6 +720,11 @@ async function startPhoneCall() {
     if (!res.ok) {
       throw new Error(data.error || 'Call failed');
     }
+
+    // Track the room so the operator can force-end it via the End Call button.
+    currentPhoneRoom = data.room_name || '';
+    document.getElementById('btnDisconnect').disabled = false;
+    document.getElementById('btnPhoneCall').disabled = true;
 
     setStatus('connected', 'Phone call active — agent is talking to ' + name);
     addLog(`Call connected: room ${data.room_name}`, 'success');

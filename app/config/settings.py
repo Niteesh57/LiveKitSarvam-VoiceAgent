@@ -41,6 +41,24 @@ class Settings(BaseSettings):
     host: str = Field(default="0.0.0.0", description="Server bind host")
     debug: bool = Field(default=False, description="Enable debug mode")
 
+    # ─── Security (all opt-in — empty/defaults preserve current behavior) ──
+    api_auth_token: str = Field(
+        default="",
+        description="If set, all /api routes + dashboard require this token "
+        "(X-API-Key header, Bearer token, or ?token= query param). "
+        "Empty = auth disabled (logs a warning at startup).",
+    )
+    allowed_origins: str = Field(
+        default="",
+        description="Comma-separated CORS origins. Empty = localhost only on "
+        "the configured port.",
+    )
+    call_rate_limit_per_minute: int = Field(
+        default=20,
+        description="Max outbound-call trigger requests per minute "
+        "(POST /api/call and /api/call/batch). 0 = unlimited.",
+    )
+
     # ─── Data Storage ─────────────────────────────────────────────────
     data_dir: Path = Field(
         default=Path(__file__).parent.parent.parent / "data",

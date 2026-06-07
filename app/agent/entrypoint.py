@@ -109,8 +109,15 @@ async def entrypoint(ctx: JobContext):
     # Pre-warm TTS connection to eliminate first-request jitter
     await tts_instance.prewarm()
 
+    # Reuse the VAD model prewarmed once per worker process (see run_agent.py).
+    # Fall back to a fresh load if prewarm didn't run (e.g. simulate_job).
+    vad_instance = ctx.proc.userdata.get("vad")
+    if vad_instance is None:
+        logger.warning("VAD not prewarmed for this process — loading on demand")
+        vad_instance = silero.VAD.load()
+
     session = AgentSession(
-        vad=silero.VAD.load(),
+        vad=vad_instance,
         stt=stt_instance,
         llm=llm_instance,
         tts=tts_instance,
@@ -154,7 +161,9 @@ async def entrypoint(ctx: JobContext):
 
     logger.info("Local call recording started for room: %s", ctx.room.name)
 
-    # Agent speaks first — short warm greeting with broker name
+    # Agent speaks first — short warm greeting only. The new/alternative
+    # property options are introduced on the NEXT turn, after the customer
+    # responds to the greeting (see system_prompt.md conversation strategy).
     from app.config.constants import BROKER_NAME
     await session.generate_reply(
         instructions=f"Say exactly this greeting in Devanagari Hindi: 'हैलो {customer_name} जी! मैं {BROKER_NAME} बोल रहा हूँ, Sunrise Properties से। कैसे हैं आप?' — say only this one sentence, nothing more."

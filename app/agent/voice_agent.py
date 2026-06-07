@@ -75,9 +75,22 @@ class BrokerAssistant(Agent):
         now = datetime.now(IST)
         slot_lower = slot_chosen.lower()
 
-        # Simple past-time detection: if "today" or "aaj" in slot and common past indicators
-        # The LLM is instructed to handle this via system prompt, but we add a safety check
-        if any(word in slot_lower for word in ["yesterday", "kal", "बीता"]):
+        # Deterministic safety check for UNAMBIGUOUS past-time markers only.
+        # The LLM is instructed to handle past-time validation via the system
+        # prompt; this is just a backstop.
+        #
+        # NOTE: "kal" (कल) is intentionally EXCLUDED here — in Hindi it means
+        # BOTH "yesterday" AND "tomorrow". Matching it previously rejected
+        # valid next-day bookings (e.g. "kal subah" = tomorrow morning),
+        # which defeated the booking flow. Disambiguating "kal" requires real
+        # date parsing, which the LLM handles contextually.
+        past_markers = [
+            "yesterday",
+            "बीता", "बीते",      # beeta / beete (passed)
+            "पिछले", "पिछला",     # pichhle / pichhla (last/previous)
+            "गुज़रा", "गुजरा",     # guzra (gone by)
+        ]
+        if any(marker in slot_lower for marker in past_markers):
             return {
                 "status": "error",
                 "message": "वो time तो निकल गया जी। आज के बाद का कोई time बताइए?",
@@ -97,10 +110,6 @@ class BrokerAssistant(Agent):
 
         # Update lead score to "hot"
         data_store.update_lead_score(customer_phone, "hot")
-
-        # Schedule reminder (stored in reminders.json)
-        from app.core.reminders import reminder_manager
-        reminder_manager.mark_reminder_sent(customer_phone, "")  # Initialize tracking
 
         # Queue WhatsApp confirmation with office address
         queue_appointment_confirmation(customer_phone, customer_name, slot_chosen)
