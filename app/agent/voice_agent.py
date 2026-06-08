@@ -47,10 +47,16 @@ class BrokerAssistant(Agent):
         customer_name: str,
         customer_phone: str,
         system_prompt: str,
+        job_context=None,
     ):
         super().__init__(instructions=system_prompt)
         self.customer_name = customer_name
         self.customer_phone = customer_phone
+        # JobContext gives us reliable room teardown (delete_room / shutdown).
+        self._job_context = job_context
+        # Guard so concurrent triggers (e.g. end_call + log_call_outcome DNC)
+        # don't try to tear the call down twice.
+        self._disconnecting = False
 
     @function_tool
     async def book_appointment(
@@ -195,29 +201,131 @@ class BrokerAssistant(Agent):
 
         return {"status": "logged", "outcome": outcome, "lead_score": score}
 
-    async def _force_disconnect(self, delay: float = 4.0) -> None:
-        """Force-close the session and delete the room after a delay."""
+    async def _force_disconnect(self, delay: float = 4.0, wait_for_speech: bool = True) -> None:
+        """Force-close the call: wait for the goodbye to finish, then tear down.
+
+        The primary termination signal is the current speech's playout
+        completion — we wait for the agent to actually finish saying its
+        goodbye line before disconnecting, so the customer hears the full
+        message instead of getting cut off (or, worse, the agent lingering in
+        the room and continuing to answer). ``delay`` is kept for backward
+        compatibility and acts as a minimum settle time; a generous absolute
+        cap prevents hanging forever if playout state is ever unavailable.
+
+        Set ``wait_for_speech=False`` to skip the playout wait entirely — used
+        when the customer has already left the room, so there is nobody left to
+        hear the goodbye and we should tear down right away.
+        """
         import asyncio
+
+        # Idempotent — only the first trigger runs the teardown.
+        if self._disconnecting:
+            return
+        self._disconnecting = True
+
+        session = self.session
+
+        # 1. Wait for the agent to finish speaking its goodbye. Capped well
+        #    above any realistic single utterance so we never clip the line,
+        #    but bounded so a stuck playout can't hang the teardown.
+        if wait_for_speech:
+            try:
+                await asyncio.wait_for(
+                    self._wait_for_speech_done(session), timeout=20.0
+                )
+            except asyncio.TimeoutError:
+                logger.debug("Goodbye playout wait timed out — proceeding to disconnect")
+            except Exception as e:
+                logger.debug("Speech-wait error (non-critical): %s", e)
+
+            # Small tail pause so the very end of the audio isn't clipped.
+            await asyncio.sleep(0.5)
+
+        # 2. Close the agent session (stops STT/LLM/TTS and unpublishes tracks).
+        try:
+            if session is not None:
+                await session.aclose()
+                logger.info("Agent session closed for %s", self.customer_phone)
+        except Exception as e:
+            logger.debug("session.aclose() error (non-critical): %s", e)
+
+        # 3. Delete the LiveKit room so EVERY participant (browser/SIP) is
+        #    disconnected and the client receives a Disconnected event.
+        room_name = None
+        try:
+            if self._job_context is not None and self._job_context.room is not None:
+                room_name = self._job_context.room.name
+        except Exception:
+            room_name = None
+
+        try:
+            if self._job_context is not None:
+                # JobContext.delete_room() is the supported teardown path and
+                # uses the worker's own LiveKit API client.
+                await self._job_context.delete_room()
+                logger.info("Room deleted via JobContext: %s", room_name)
+            else:
+                # Fallback: delete the room directly via the LiveKit API.
+                await self._delete_room_via_api(session)
+        except Exception as e:
+            logger.warning("delete_room failed, trying API fallback: %s", e)
+            try:
+                await self._delete_room_via_api(session)
+            except Exception as e2:
+                logger.debug("API room-delete fallback failed: %s", e2)
+
+        # 4. Tell the worker the job is finished so the process is freed.
+        try:
+            if self._job_context is not None:
+                self._job_context.shutdown(reason="call ended")
+        except Exception as e:
+            logger.debug("JobContext.shutdown error (non-critical): %s", e)
+
+    async def _wait_for_speech_done(self, session) -> None:
+        """Block until the agent's current speech has finished playing out."""
+        import asyncio
+
+        if session is None:
+            return
+        # Poll for the active speech handle and wait for its playout.
+        while True:
+            speech = getattr(session, "current_speech", None)
+            if speech is None:
+                # No speech in flight — give a brief grace period in case a
+                # reply is still being scheduled, then stop waiting.
+                await asyncio.sleep(0.2)
+                if getattr(session, "current_speech", None) is None:
+                    return
+                continue
+            try:
+                await speech.wait_for_playout()
+            except Exception:
+                return
+            # Loop once more in case a follow-up speech was queued.
+            await asyncio.sleep(0.1)
+
+    async def _delete_room_via_api(self, session) -> None:
+        """Fallback room teardown using a fresh LiveKit API client."""
         from livekit import api
         from app.config.settings import settings
 
-        await asyncio.sleep(delay)
-        session = self.session
+        room = None
+        room_io = getattr(session, "_room_io", None) if session else None
+        if room_io is not None:
+            room = getattr(room_io, "room", None)
+        if room is None or not getattr(room, "name", None):
+            return
+
+        lk_api = api.LiveKitAPI(
+            url=settings.livekit_url,
+            api_key=settings.livekit_api_key,
+            api_secret=settings.livekit_api_secret,
+        )
         try:
-            room = session._room if session else None
-            if session:
-                await session.aclose()
-            if room and room.name:
-                lk_api = api.LiveKitAPI(
-                    url=settings.livekit_url,
-                    api_key=settings.livekit_api_key,
-                    api_secret=settings.livekit_api_secret,
-                )
-                await lk_api.room.delete_room(api.DeleteRoomRequest(room=room.name))
-                await lk_api.aclose()
-                logger.info("Force disconnect: room deleted %s", room.name)
-        except Exception as e:
-            logger.debug("Force disconnect (non-critical): %s", e)
+            await lk_api.room.delete_room(api.DeleteRoomRequest(room=room.name))
+            logger.info("Force disconnect: room deleted %s", room.name)
+        finally:
+            await lk_api.aclose()
 
     @function_tool
     async def switch_language(

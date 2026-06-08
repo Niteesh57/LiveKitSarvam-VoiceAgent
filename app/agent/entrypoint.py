@@ -136,6 +136,7 @@ async def entrypoint(ctx: JobContext):
         customer_name=customer_name,
         customer_phone=customer_phone,
         system_prompt=system_prompt,
+        job_context=ctx,
     )
 
     # Start the session
@@ -210,6 +211,70 @@ async def entrypoint(ctx: JobContext):
 
     import asyncio as _asyncio
     _asyncio.create_task(_enforce_max_duration())
+
+    # ─── In-call inactivity watchdog ───────────────────────────────────
+    # Closes the LiveKit room / ends the session when EITHER:
+    #   1. The remote participant (customer) leaves the room, OR
+    #   2. There is no conversation activity (no user speech, agent speech,
+    #      or transcript) for CONVERSATION_INACTIVITY_TIMEOUT_SECONDS.
+    #
+    # Activity is tracked via session events; any of them refreshes the timer.
+    from app.config.constants import (
+        CONVERSATION_INACTIVITY_TIMEOUT_SECONDS,
+        INACTIVITY_WATCHDOG_INTERVAL_SECONDS,
+    )
+
+    last_activity = {"ts": time.monotonic()}
+
+    def _mark_activity(*_args, **_kwargs):
+        last_activity["ts"] = time.monotonic()
+
+    # Any of these events counts as live conversation activity.
+    session.on("user_input_transcribed", _mark_activity)
+    session.on("conversation_item_added", _mark_activity)
+    session.on("speech_created", _mark_activity)
+    session.on("agent_state_changed", _mark_activity)
+    session.on("user_state_changed", _mark_activity)
+
+    async def _inactivity_watchdog():
+        # Grace period so the room has time to spin up and the customer to
+        # actually join before we start judging it as empty/idle.
+        await _asyncio.sleep(INACTIVITY_WATCHDOG_INTERVAL_SECONDS)
+        participant_seen = False
+
+        while True:
+            await _asyncio.sleep(INACTIVITY_WATCHDOG_INTERVAL_SECONDS)
+
+            if getattr(agent, "_disconnecting", False):
+                return
+
+            # ── 1. Participant presence ──────────────────────────────
+            try:
+                remote_count = len(ctx.room.remote_participants)
+            except Exception:
+                remote_count = 0
+
+            if remote_count > 0:
+                participant_seen = True
+            elif participant_seen:
+                # Customer was here and is now gone — hang up immediately.
+                logger.info(
+                    "Customer left room %s — ending call", ctx.room.name
+                )
+                await agent._force_disconnect(delay=0.0, wait_for_speech=False)
+                return
+
+            # ── 2. Conversation inactivity ───────────────────────────
+            idle_for = time.monotonic() - last_activity["ts"]
+            if idle_for >= CONVERSATION_INACTIVITY_TIMEOUT_SECONDS:
+                logger.info(
+                    "No conversation for %.0fs on room %s — ending call",
+                    idle_for, ctx.room.name,
+                )
+                await agent._force_disconnect(delay=2.0)
+                return
+
+    _asyncio.create_task(_inactivity_watchdog())
 
     # Register shutdown callback to track call duration and save recording
     @ctx.add_shutdown_callback

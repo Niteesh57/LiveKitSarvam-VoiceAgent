@@ -54,6 +54,13 @@ VALID_OUTCOMES = [
 # ─── Agent Timing Configuration ───────────────────────────────────────────
 MAX_CALL_DURATION_SECONDS = 300  # 5 minutes max
 SILENCE_TIMEOUT_SECONDS = 30
+# Hard cap on how long the call may go with NO conversation activity (no user
+# speech, no agent speech, no transcripts). Once exceeded, the call is ended
+# and the LiveKit room is torn down. This is stricter than the server-side
+# room reaper and acts at the agent level for a fast, clean hangup.
+CONVERSATION_INACTIVITY_TIMEOUT_SECONDS = 90
+# How often the in-call watchdog checks participant presence + idle time.
+INACTIVITY_WATCHDOG_INTERVAL_SECONDS = 5
 BATCH_STAGGER_MIN_SECONDS = 5
 BATCH_STAGGER_MAX_SECONDS = 300
 BATCH_STAGGER_DEFAULT_SECONDS = 30
